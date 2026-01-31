@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+#
+# ssh_bootstrap_new_key (simple version)
+#
+# Purpose:
+#   Connects to a server using OLD SSH private keys
+#   (in a defined order). As soon as one succeeds,
+#   appends the NEW public key to ~/.ssh/authorized_keys.
+#
+# Usage:
+#   ssh_bootstrap_new_key <user> <host> [port]
+#
+
+set -euo pipefail
+
+# -----------------------------
+# check arguments
+# -----------------------------
+if [ $# -lt 2 ] || [ $# -gt 3 ]; then
+  echo "Usage: $(basename "$0") <user> <host> [port]" >&2
+  exit 2
+fi
+
+USER="$1"
+HOST="$2"
+PORT="${3:-}"
+
+# -----------------------------
+# new key
+#
+# Example: generate an Ed25519 keypair for the NEW key (run locally before using the script):
+#   ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519" -C "your@example.com" -N ""
+#
+# Or, to generate interactively:
+#   ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519"
+#
+# NOTE: The script expects the private key at ~/.ssh/id_ed25519
+# and the public key at ~/.ssh/id_ed25519.pub
+# -----------------------------
+NEW_PRIV="$HOME/.ssh/id_ed25519"
+NEW_PUB="$HOME/.ssh/id_ed25519.pub"
+
+# -----------------------------
+# old keys
+# -----------------------------
+OLD_KEYS=(
+  "$HOME/.ssh/old/id_ed25519"
+  "$HOME/.ssh/old/id_rsa"
+  "$HOME/.ssh/old/otc_pk"
+)
+
+# -----------------------------
+# Sanity Checks
+# -----------------------------
+[ -f "$NEW_PRIV" ] || { echo "ERROR: missing new private key: $NEW_PRIV" >&2; exit 2; }
+[ -f "$NEW_PUB"  ] || { echo "ERROR: missing new public key:  $NEW_PUB"  >&2; exit 2; }
+
+PUB="$(cat "$NEW_PUB")"
+
+# -----------------------------
+# SSH base options
+# -----------------------------
+SSH_BASE=(ssh -o IdentitiesOnly=yes -o ConnectTimeout=10)
+
+[ -n "$PORT" ] && SSH_BASE+=(-p "$PORT")
+
+# -----------------------------
+# Remote-Command:
+# - ~/.ssh sicherstellen
+# - append new Public Key 
+# -----------------------------
+remote_append_cmd="mkdir -p ~/.ssh; printf '%s\n' '$PUB' >> ~/.ssh/authorized_keys; echo '__APPENDED__'"
+
+# -----------------------------
+# functions
+# -----------------------------
+try_with_old_key() {
+  local key="$1"
+  "${SSH_BASE[@]}" -i "$key" "${USER}@${HOST}" "$remote_append_cmd"
+}
+
+check_new_key() {
+  "${SSH_BASE[@]}" -i "$NEW_PRIV" "${USER}@${HOST}" "echo '__NEWKEY_OK__'"
+}
+
+# -----------------------------
+# 
+# -----------------------------
+echo "Target: ${USER}@${HOST}${PORT:+:${PORT}}"
+echo
+
+worked_key=""
+
+for k in "${OLD_KEYS[@]}"; do
+  [ ! -f "$k" ] && echo "Skip (missing): $k" && continue
+
+  echo "Trying old key: $k"
+  if try_with_old_key "$k" >/dev/null 2>&1; then
+    worked_key="$k"
+    echo "OK: connected with $k, new key appended."
+    break
+  else
+    echo "FAIL: $k"
+  fi
+done
+
+if [ -z "$worked_key" ]; then
+  echo
+  echo "ERROR: none of the old keys worked for ${USER}@${HOST}${PORT:+:${PORT}}" >&2
+  exit 1
+fi
+
+# -----------------------------
+# Verification
+# -----------------------------
+echo
+echo "Verifying login with NEW key..."
+if check_new_key >/dev/null 2>&1; then
+  echo "SUCCESS: new key works."
+  echo "Old key used: $worked_key"
+  exit 0
+else
+  echo "WARNING: new key appended, but login with new key failed." >&2
+  echo "Old key used: $worked_key" >&2
+  exit 3
+fi
+
+
